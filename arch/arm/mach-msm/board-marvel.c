@@ -56,6 +56,7 @@
 /* #include <mach/gpio_chip.h> */
 #include <mach/board.h>
 #include <mach/board_htc.h>
+#include <mach/bcm_bt_lpm.h>
 #include <mach/msm_serial_hs.h>
 #include <mach/atmega_microp.h>
 #include <mach/htc_battery.h>
@@ -1164,8 +1165,57 @@ static struct platform_device marvel_flashlight_device = {
 	},
 };
 
+#if defined(CONFIG_SERIAL_MSM_HS) && defined(CONFIG_SERIAL_MSM_HS_PURE_ANDROID)
+static struct msm_serial_hs_platform_data msm_uart_dm1_pdata = {
+	.rx_wakeup_irq = -1,
+	.inject_rx_on_wakeup = 0,
+	.exit_lpm_cb = bcm_bt_lpm_exit_lpm_locked,
+};
+
+static struct bcm_bt_lpm_platform_data bcm_bt_lpm_pdata = {
+	.gpio_wake = MARVEL_GPIO_BT_CHIP_WAKE,
+	.gpio_host_wake = MARVEL_GPIO_BT_HOST_WAKE,
+	.request_clock_off_locked = msm_hs_request_clock_off_locked,
+	.request_clock_on_locked = msm_hs_request_clock_on_locked,
+};
+
+struct platform_device marvel_bcm_bt_lpm_device = {
+	.name = "bcm_bt_lpm",
+	.id = 0,
+	.dev = {
+		.platform_data = &bcm_bt_lpm_pdata,
+	},
+};
+
+#define ATAG_BDADDR 0x43294329  /* mahimahi bluetooth address tag */
+#define ATAG_BDADDR_SIZE 4
+#define BDADDR_STR_SIZE 18
+
+static char bdaddr[BDADDR_STR_SIZE];
+extern unsigned char *get_bt_bd_ram(void);
+
+
+
+module_param_string(bdaddr, bdaddr, sizeof(bdaddr), S_IWUSR | S_IRUGO);
+MODULE_PARM_DESC(bdaddr, "bluetooth address");
+
+#elif defined(CONFIG_SERIAL_MSM_HS)
+static struct msm_serial_hs_platform_data msm_uart_dm1_pdata = {
+	.wakeup_irq = MSM_GPIO_TO_INT(MARVEL_GPIO_BT_HOST_WAKE),
+	.inject_rx_on_wakeup = 0,
+	.cpu_lock_supported = 1,
+
+	/* for bcm */
+	.bt_wakeup_pin_supported = 1,
+	.bt_wakeup_pin = MARVEL_GPIO_BT_CHIP_WAKE,
+	.host_wakeup_pin = MARVEL_GPIO_BT_HOST_WAKE,
+
+};
+#endif
+
 static struct platform_device *devices[] __initdata = {
 	&msm_device_i2c,
+	&marvel_bcm_bt_lpm_device,
 	&htc_battery_pdev,
 	&msm_camera_sensor_s5k4e1gx,
 	&marvel_rfkill,
@@ -1324,19 +1374,7 @@ static struct perflock_platform_data marvel_perflock_data = {
 	.table_size = ARRAY_SIZE(marvel_perf_acpu_table),
 };
 
-#ifdef CONFIG_SERIAL_MSM_HS
-static struct msm_serial_hs_platform_data msm_uart_dm1_pdata = {
-	.rx_wakeup_irq = MSM_GPIO_TO_INT(MARVEL_GPIO_BT_HOST_WAKE),
-	.inject_rx_on_wakeup = 0,
-	.cpu_lock_supported = 1,
 
-	/* for bcm */
-	.bt_wakeup_pin_supported = 1,
-	.bt_wakeup_pin = MARVEL_GPIO_BT_CHIP_WAKE,
-	.host_wakeup_pin = MARVEL_GPIO_BT_HOST_WAKE,
-
-};
-#endif
 
 static ssize_t marvel_virtual_keys_show(struct kobject *kobj,
 			struct kobj_attribute *attr, char *buf)
