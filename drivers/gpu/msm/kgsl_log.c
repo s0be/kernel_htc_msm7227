@@ -74,9 +74,9 @@ void kgsl_device_log_init(struct kgsl_device *device)
 	if (!device->d_debugfs || IS_ERR(device->d_debugfs))
 		return;
 
-	device->cmd_log = 7;
+	device->cmd_log = KGSL_LOG_LEVEL_DEFAULT;
 	device->ctxt_log = KGSL_LOG_LEVEL_DEFAULT;
-	device->drv_log = 7;
+	device->drv_log = KGSL_LOG_LEVEL_DEFAULT;
 	device->mem_log = KGSL_LOG_LEVEL_DEFAULT;
 	device->pwr_log = KGSL_LOG_LEVEL_DEFAULT;
 
