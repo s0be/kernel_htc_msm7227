@@ -125,9 +125,11 @@ static struct clkctl_acpu_speed msm7227_tbl[] = {
 	{  768000, ACPU_PLL_0, 4, 1, 192000, 3, VDD_7, 192000, 0, 5, -1, 0x28 },
 	{  787200, ACPU_PLL_0, 4, 1, 196800, 3, VDD_7, 196800, 0, 5, -1, 0x29 },
 	{  806400, ACPU_PLL_0, 4, 1, 201600, 3, VDD_7, 201600, 0, 5, -1, 0x2a },
+#if 0 /* disable values which will probably toast the device */
 	{  825600, ACPU_PLL_0, 4, 1, 206400, 3, VDD_7, 206400, 0, 6, -1, 0x2b },
 	{  844800, ACPU_PLL_0, 4, 1, 211200, 3, VDD_7, 211200, 0, 6, -1, 0x2c },
 	{  864000, ACPU_PLL_0, 4, 1, 216000, 3, VDD_7, 216000, 0, 6, -1, 0x2d },
+#endif
 	{  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
 };
 /* PLL0(mpll): 960MHz, PLL1(gpll):245.76MHz, PLL2(bpll): 800MHz */
