@@ -102,9 +102,8 @@ struct usb_function {
 	struct usb_descriptor_header	**hs_descriptors;
 
 	struct usb_configuration	*config;
-
 	/* disabled is zero if the function is enabled */
-	int				disabled;
+	int				hidden;
 
 	/* REVISIT:  bind() functions can be marked __init, which
 	 * makes trouble for section mismatch analysis.  See if
@@ -144,6 +143,7 @@ int usb_function_activate(struct usb_function *);
 int usb_interface_id(struct usb_configuration *, struct usb_function *);
 
 void usb_function_set_enabled(struct usb_function *, int);
+void usb_function_set_enabled_mute(struct usb_function *, int, bool);
 void usb_composite_force_reset(struct usb_composite_dev *);
 
 /**
@@ -358,6 +358,8 @@ struct usb_composite_dev {
 	struct switch_dev		sw_connected;
 	/* switch indicating current configuration */
 	struct switch_dev		sw_config;
+	/* switch indicating Connect_to_PC App only */
+	struct switch_dev		sw_connect2pc;
 	/* current connected state for sw_connected */
 	bool				connected;
 

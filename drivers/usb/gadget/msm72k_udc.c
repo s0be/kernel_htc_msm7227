@@ -49,11 +49,15 @@
 #endif
 #ifdef CONFIG_USB_ACCESSORY_DETECT_BY_ADC
 #include <mach/htc_headset_mgr.h>
+#ifdef CONFIG_HTC_HEADSET_MISC
+#include <mach/htc_headset_misc.h>
+#endif
 #endif
 #ifdef CONFIG_CABLE_DETECT_ACCESSORY
 #include <mach/cable_detect.h>
 #endif
 #include <mach/clk.h>
+#include <mach/atmega_microp.h>
 
 static const char driver_name[] = "msm72k_udc";
 
@@ -100,8 +104,17 @@ static struct switch_dev dock_switch = {
 #define DOCK_STATE_UNDOCKED     0
 #define DOCK_STATE_DESK         (1 << 0)
 #define DOCK_STATE_CAR          (1 << 1)
+#define DOCK_STATE_USB_HEADSET  (1 << 2)
+#define DOCK_STATE_MHL          (1 << 3)
 
 #define DOCK_DET_DELAY		HZ/4
+
+/* #define MHL_REDETECT */
+#define ADC_RETRY 3
+#define ADC_RETRY_DELAY HZ/5
+
+#define PM8058ADC_16BIT(adc) ((adc * 2200) / 65535) /* vref=2.2v, 16-bits resolution */
+#define MICROPADC_10BIT(adc) ((adc * 2600) / 1023) /* vref=2.6v, 10-bits */
 #endif
 
 #include <linux/wakelock.h>
@@ -165,6 +178,9 @@ static void dock_isr_work(struct work_struct *w);
 static void dock_detect_work(struct work_struct *w);
 static void dock_detect_init(struct usb_info *ui);
 #endif
+extern int android_switch_function(unsigned func);
+extern int android_show_function(char *buf);
+extern void android_set_serialno(char *serialno);
 
 #define USB_STATE_IDLE    0
 #define USB_STATE_ONLINE  1
@@ -229,7 +245,7 @@ struct usb_info {
 	struct workqueue_struct *usb_wq;
 	struct work_struct work;
 	struct delayed_work chg_work;
-	struct work_struct detect_work;
+	struct delayed_work detect_work;
 	struct work_struct notifier_work;
 	struct work_struct usb_hub_work;
 	unsigned phy_status;
@@ -258,7 +274,9 @@ struct usb_info {
 	/* for accessory detection */
 	bool dock_detect;
 	u8 accessory_detect;
+	u8 use_microp_adc;
 	u8 mfg_usb_carkit_enable;
+	u8 cable_redetect;
 	int idpin_irq;
 	int usb_id_pin_gpio;
 
@@ -1070,11 +1088,15 @@ static void flush_endpoint(struct msm_endpoint *ept)
 	flush_endpoint_sw(ept);
 }
 
-static void handle_notify_offline(struct usb_info *ui)
+static void handle_notify_offline(struct usb_info *ui, int mute)
 {
 	if (ui->driver) {
 		USB_INFO("%s: notify offline\n", __func__);
-		ui->driver->disconnect(&ui->gadget);
+
+		if (mute)
+			ui->driver->mute_disconnect(&ui->gadget);
+		else
+			ui->driver->disconnect(&ui->gadget);
 	}
 	/* cancel pending ep0 transactions */
 	flush_endpoint(&ui->ep0out);
@@ -1131,7 +1153,7 @@ static irqreturn_t usb_interrupt(int irq, void *data)
 			*/
 			atomic_set(&ui->online, 0);
 
-			handle_notify_offline(ui);
+			handle_notify_offline(ui, 1);
 		}
 		if (ui->connect_type != CONNECT_TYPE_USB) {
 			ui->connect_type = CONNECT_TYPE_USB;
@@ -1192,6 +1214,119 @@ static ssize_t show_usb_cable_connect(struct device *dev,
 }
 
 static DEVICE_ATTR(usb_cable_connect, 0444, show_usb_cable_connect, NULL);
+
+static ssize_t show_usb_function_switch(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	return android_show_function(buf);
+}
+
+static ssize_t store_usb_function_switch(struct device *dev,
+	struct device_attribute *attr, const char *buf, size_t count)
+{
+	unsigned u;
+	ssize_t  ret;
+
+	u = simple_strtoul(buf, NULL, 10);
+	ret = android_switch_function(u);
+
+	if (ret == 0)
+		return count;
+	else
+		return 0;
+}
+
+static DEVICE_ATTR(usb_function_switch, 0664,
+	show_usb_function_switch, store_usb_function_switch);
+
+static ssize_t show_usb_serial_number(struct device *dev,
+	struct device_attribute *attr, char *buf)
+{
+	unsigned length;
+	struct msm_hsusb_platform_data *pdata = dev->platform_data;
+
+	length = sprintf(buf, "%s", pdata->serial_number);
+	return length;
+}
+
+static ssize_t store_usb_serial_number(struct device *dev,
+	struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct msm_hsusb_platform_data *pdata = dev->platform_data;
+	char *serialno = "000000000000";
+
+	if (buf[0] == '0' || buf[0] == '1') {
+		memset(mfg_df_serialno, 0x0, sizeof(mfg_df_serialno));
+		if (buf[0] == '0') {
+			strncpy(mfg_df_serialno, serialno, strlen(serialno));
+			use_mfg_serialno = 1;
+			android_set_serialno(mfg_df_serialno);
+		} else {
+			strncpy(mfg_df_serialno, pdata->serial_number,
+				strlen(pdata->serial_number));
+			use_mfg_serialno = 0;
+			android_set_serialno(pdata->serial_number);
+		}
+		/* reset_device */
+		msm_hsusb_request_reset();
+	}
+
+	return count;
+}
+
+static DEVICE_ATTR(usb_serial_number, 0644,
+	show_usb_serial_number, store_usb_serial_number);
+
+static ssize_t show_dummy_usb_serial_number(struct device *dev,
+	struct device_attribute *attr, char *buf)
+{
+	unsigned length;
+	struct msm_hsusb_platform_data *pdata = dev->platform_data;
+
+	if (use_mfg_serialno)
+		length = sprintf(buf, "%s", mfg_df_serialno); /* dummy */
+	else
+		length = sprintf(buf, "%s", pdata->serial_number); /* Real */
+	return length;
+}
+
+static ssize_t store_dummy_usb_serial_number(struct device *dev,
+	struct device_attribute *attr, const char *buf, size_t count)
+{
+	int data_buff_size = (sizeof(mfg_df_serialno) > strlen(buf))?
+		strlen(buf):sizeof(mfg_df_serialno);
+	int loop_i;
+
+	/* avoid overflow, mfg_df_serialno[16] always is 0x0 */
+	if (data_buff_size == 16)
+		data_buff_size--;
+
+	for (loop_i = 0; loop_i < data_buff_size; loop_i++)	{
+		if (buf[loop_i] >= 0x30 && buf[loop_i] <= 0x39) /* 0-9 */
+			continue;
+		else if (buf[loop_i] >= 0x41 && buf[loop_i] <= 0x5A) /* A-Z */
+			continue;
+		if (buf[loop_i] == 0x0A) /* Line Feed */
+			continue;
+		else {
+			USB_WARNING("%s(): get invaild char (0x%2.2X)\n",
+				__func__, buf[loop_i]);
+			return -EINVAL;
+		}
+	}
+
+	use_mfg_serialno = 1;
+	memset(mfg_df_serialno, 0x0, sizeof(mfg_df_serialno));
+	strncpy(mfg_df_serialno, buf, data_buff_size);
+	android_set_serialno(mfg_df_serialno);
+	/*device_reset */
+	msm_hsusb_request_reset();
+
+	return count;
+}
+
+static DEVICE_ATTR(dummy_usb_serial_number, 0644,
+	show_dummy_usb_serial_number, store_dummy_usb_serial_number);
 
 static ssize_t show_USB_ID_status(struct device *dev,
 			struct device_attribute *attr,
@@ -1362,7 +1497,7 @@ static void usb_prepare(struct usb_info *ui)
 	}
 	INIT_WORK(&ui->work, usb_do_work);
 #ifdef CONFIG_USB_ACCESSORY_DETECT
-	INIT_WORK(&ui->detect_work, accessory_detect_work);
+	INIT_DELAYED_WORK(&ui->detect_work, accessory_detect_work);
 #endif
 #ifdef CONFIG_DOCK_ACCESSORY_DETECT
 	if (ui->dock_detect) {
@@ -1382,6 +1517,21 @@ static void usb_prepare(struct usb_info *ui)
 		&dev_attr_usb_cable_connect);
 	if (ret != 0)
 		USB_WARNING("dev_attr_usb_cable_connect failed\n");
+
+	ret = device_create_file(&ui->pdev->dev,
+		&dev_attr_usb_function_switch);
+	if (ret != 0)
+		USB_WARNING("dev_attr_usb_function_switch failed\n");
+
+	ret = device_create_file(&ui->pdev->dev,
+		&dev_attr_usb_serial_number);
+	if (ret != 0)
+		USB_WARNING("dev_attr_usb_serial_number failed\n");
+
+	ret = device_create_file(&ui->pdev->dev,
+		&dev_attr_dummy_usb_serial_number);
+	if (ret != 0)
+		USB_WARNING("dev_attr_dummy_usb_serial_number failed\n");
 
 	ret = device_create_file(&ui->pdev->dev,
 		&dev_attr_USB_ID_status);
@@ -1494,6 +1644,9 @@ static void usb_reset(struct usb_info *ui)
 	if (ui->phy_reset)
 		ui->phy_reset();
 
+	if (readl(USB_OTGSC) & OTGSC_IDPU)
+		writel(readl(USB_OTGSC) & ~OTGSC_IDPU, USB_OTGSC);
+
 	msleep(100);
 
 	/* RESET */
@@ -1526,7 +1679,7 @@ static void usb_reset(struct usb_info *ui)
 	/* marking us offline will cause ept queue attempts to fail */
 	atomic_set(&ui->online, 0);
 
-	handle_notify_offline(ui);
+	handle_notify_offline(ui, 1);
 
 	/* enable interrupts */
 	writel(STS_URI | STS_SLI | STS_UI | STS_PCI, USB_USBINTR);
@@ -1819,81 +1972,182 @@ static void carkit_detect(struct usb_info *ui)
 }
 
 #ifdef CONFIG_USB_ACCESSORY_DETECT_BY_ADC
-static void mhl_detect(struct usb_info *ui)
+static void accessory_type_switch(int type)
 {
-	uint32_t adc_value = 0xffffffff;
+	struct usb_info *ui = the_usb_info;
+	USB_INFO("%s accessory_type %d, type %d\n",
+			__func__, ui->accessory_type, type);
 
-	if (ui->config_usb_id_gpios)
-		ui->config_usb_id_gpios(1);
+	if (type == 0 || ui->accessory_type != type)
+		switch_set_state(&dock_switch, DOCK_STATE_UNDOCKED);
 
-	htc_get_usb_accessory_adc_level(&adc_value);
-	USB_INFO("[2nd] accessory adc = 0x%x\n", adc_value);
-
-	if (adc_value >= 0x5999 && adc_value <= 0x76B0) {
+	switch (type) {
+	case 1:
+		USB_INFO("carkit inserted\n");
+		ui->accessory_type = 1;
+		if ((board_mfg_mode() == 0) || (board_mfg_mode() == 1 &&
+			ui->mfg_usb_carkit_enable == 1)) {
+			switch_set_state(&dock_switch, DOCK_STATE_CAR);
+			USB_INFO("carkit: set state %d\n", DOCK_STATE_CAR);
+		}
+		break;
+	case 2:
+		USB_INFO("headset inserted\n");
+		ui->accessory_type = 2;
+		headset_ext_detect(USB_AUDIO_OUT);
+		break;
+	case 3:
+		USB_INFO("Desk Cradle inserted\n");
+		ui->accessory_type = 3;
+		switch_set_state(&dock_switch, DOCK_STATE_DESK);
+		USB_INFO("Desk Cradle: set state %d\n", DOCK_STATE_DESK);
+		break;
+	case 4:
 		USB_INFO("MHL inserted\n");
+#ifdef CONFIG_MSM_HDMI_MHL
+		ui->accessory_type = 4;
 		if (ui->usb_mhl_switch)
 			ui->usb_mhl_switch(1);
-		ui->accessory_type = 4;
-	}
-	if (ui->config_usb_id_gpios)
-		ui->config_usb_id_gpios(0);
-}
-
-static void accessory_detect_by_adc(struct usb_info *ui)
-{
-	int value;
-
-	msleep(100);
-
-	value = gpio_get_value(ui->usb_id_pin_gpio);
-	USB_INFO("%s: usb ID pin = %d\n", __func__, value);
-
-	if (value == 0) {
-		uint32_t adc_value = 0xffffffff;
-		htc_get_usb_accessory_adc_level(&adc_value);
-		USB_INFO("accessory adc = 0x%x\n", adc_value);
-		if (adc_value >= 0x2112 && adc_value <= 0x3D53) {
-			USB_INFO("headset inserted\n");
-			ui->accessory_type = 2;
-			headset_ext_detect(USB_AUDIO_OUT);
-		} else if (adc_value >= 0x1174 && adc_value <= 0x1E38) {
-			USB_INFO("carkit inserted\n");
-			ui->accessory_type = 1;
-			if ((board_mfg_mode() == 0) || (board_mfg_mode() == 1 &&
-				ui->mfg_usb_carkit_enable == 1)) {
-				switch_set_state(&dock_switch, DOCK_STATE_CAR);
-				USB_INFO("carkit: set state %d\n", DOCK_STATE_CAR);
-			}
-		} else if (adc_value >= 0x0 && adc_value < 0x1174) {
-			mhl_detect(ui);
-		} else
-			ui->accessory_type = 0;
-	} else {
+		switch_set_state(&dock_switch, DOCK_STATE_MHL);
+		USB_INFO("MHL: set state %d\n", DOCK_STATE_MHL);
+#endif
+		break;
+	case -1:
+		break;
+	case 0:
 		switch (ui->accessory_type) {
 		case 1:
 			USB_INFO("carkit removed\n");
-			switch_set_state(&dock_switch, DOCK_STATE_UNDOCKED);
-			ui->accessory_type = 0;
 			break;
 		case 2:
 			USB_INFO("headset removed\n");
 			headset_ext_detect(USB_NO_HEADSET);
-			ui->accessory_type = 0;
 			break;
 		case 3:
+			USB_INFO("Desk Cradle removed\n");
+			break;
+		case 4:
 			/*MHL*/
 			break;
 		default:
 			break;
 		}
+		ui->accessory_type = 0;
+		break;
 	}
+}
+
+static int mhl_detect(struct usb_info *ui)
+{
+	uint32_t adc_value = 0xffffffff;
+	int type = 0;
+
+	if (ui->config_usb_id_gpios)
+		ui->config_usb_id_gpios(1);
+
+	if (ui->use_microp_adc) {
+		uint8_t data[2];
+		memset(data, 0x0, 2);
+		if (microp_read_adc(data))
+			USB_ERR("%s: read microp adc fail\n", __func__);
+		adc_value = data[0]<<8 | data[1];
+		adc_value = MICROPADC_10BIT(adc_value);
+		USB_INFO("[2nd] accessory microp adc = %d\n", adc_value);
+
+		if (adc_value >= 1200 && adc_value <= 1300)
+			type = 4;
+		else
+			type = -1;
+	} else {
+		htc_get_usb_accessory_adc_level(&adc_value);
+		USB_INFO("[2nd] accessory adc = 0x%x\n", adc_value);
+
+		if (adc_value >= 0x5999 && adc_value <= 0x76B0)
+			type = 4;
+		else
+			type = -1;
+	}
+
+	if (ui->config_usb_id_gpios)
+		ui->config_usb_id_gpios(0);
+
+	return type;
+}
+
+static int accessory_detect_by_adc(struct usb_info *ui)
+{
+	int value, type;
+	static int prev_type, stable_count;
+
+	value = gpio_get_value(ui->usb_id_pin_gpio);
+	USB_INFO("%s: usb ID pin = %d\n", __func__, value);
+
+	if (stable_count >= ADC_RETRY)
+		stable_count = 0;
+
+	if (value == 0 || ui->cable_redetect) {
+		uint32_t adc_value = 0xffffffff;
+
+		if (ui->use_microp_adc) {
+			uint8_t data[2];
+			memset(data, 0x0, 2);
+			if (microp_read_adc(data))
+				USB_ERR("%s: read microp adc fail\n", __func__);
+			adc_value = data[0]<<8 | data[1];
+			adc_value = MICROPADC_10BIT(adc_value);
+			USB_INFO("accessory microp adc = %d\n", adc_value);
+			if (adc_value >= 500 && adc_value <= 620) {
+				type = 2;
+			} else if (adc_value >= 800 && adc_value <= 860) {
+				/* Cradle: 0.551 mV ~ 0.601 mV */
+				type = 3;
+			} else if (adc_value >= 200 && adc_value <= 400) {
+				type = 1;
+			} else if (adc_value >= 0 && adc_value < 200) {
+				type = mhl_detect(ui);
+			} else
+				type = -1;
+		} else {
+			htc_get_usb_accessory_adc_level(&adc_value);
+			USB_INFO("accessory adc = 0x%x\n", adc_value);
+			if (adc_value >= 0x2112 && adc_value <= 0x3D53) {
+				type = 2;
+			} else if (adc_value >= 0x401D && adc_value <= 0x45EE) {
+				/* Cradle: 0.551 mV ~ 0.601 mV */
+				type = 3;
+			} else if (adc_value >= 0x1174 && adc_value <= 0x1E38) {
+				type = 1;
+			} else if (adc_value >= 0x0 && adc_value < 0x1174) {
+				type = mhl_detect(ui);
+			} else
+				type = -1;
+		}
+	} else
+		type = 0;
+
+	if (prev_type == type)
+		stable_count++;
+	else
+		stable_count = 0;
+
+	USB_INFO("%s prev_type %d, type %d, stable_count %d\n",
+				__func__, prev_type, type, stable_count);
+
+	if (stable_count >= ADC_RETRY)
+		accessory_type_switch(type);
+	prev_type = type;
+	return stable_count;
 }
 #endif
 
 static void accessory_detect_work(struct work_struct *w)
 {
-	struct usb_info *ui = container_of(w, struct usb_info, detect_work);
+	struct usb_info *ui = container_of(
+			w, struct usb_info, detect_work.work);
 	int value;
+#ifdef CONFIG_USB_ACCESSORY_DETECT_BY_ADC
+	int stable_count;
+#endif
 
 	if (!ui->accessory_detect)
 		return;
@@ -1901,15 +2155,29 @@ static void accessory_detect_work(struct work_struct *w)
 	if (ui->accessory_detect == 1)
 		carkit_detect(ui);
 #ifdef CONFIG_USB_ACCESSORY_DETECT_BY_ADC
-	else if (ui->accessory_detect == 2)
-		accessory_detect_by_adc(ui);
+	else if (ui->accessory_detect == 2) {
+		stable_count = accessory_detect_by_adc(ui);
+		if (stable_count < ADC_RETRY) {
+			queue_delayed_work(ui->usb_wq,
+				&ui->detect_work, ADC_RETRY_DELAY);
+			return;
+		}
+	}
 #endif
 
 	value = gpio_get_value(ui->usb_id_pin_gpio);
-	if (value == 0)
-		set_irq_type(ui->idpin_irq, IRQF_TRIGGER_HIGH);
+	USB_INFO("%s ID pin %d, type %d\n", __func__,
+				value, ui->accessory_type);
+#ifdef CONFIG_MSM_HDMI_MHL
+	if (ui->accessory_type == 4)
+		return;
+#endif
+	if (ui->accessory_type == 0)
+		set_irq_type(ui->idpin_irq,
+			value ? IRQF_TRIGGER_LOW : IRQF_TRIGGER_HIGH);
 	else
-		set_irq_type(ui->idpin_irq, IRQF_TRIGGER_LOW);
+		set_irq_type(ui->idpin_irq, IRQF_TRIGGER_HIGH);
+
 	enable_irq(ui->idpin_irq);
 }
 
@@ -1919,9 +2187,34 @@ static irqreturn_t usbid_interrupt(int irq, void *data)
 
 	disable_irq_nosync(ui->idpin_irq);
 	USB_INFO("id interrupt\n");
-	queue_work(ui->usb_wq, &ui->detect_work);
+	ui->cable_redetect = 0;
+	queue_delayed_work(ui->usb_wq, &ui->detect_work, ADC_RETRY_DELAY);
 	return IRQ_HANDLED;
 }
+
+#ifdef CONFIG_USB_ACCESSORY_DETECT_BY_ADC
+static ssize_t adc_status_show(struct device *dev,
+	struct device_attribute *attr, char *buf)
+{
+	struct usb_info *ui = the_usb_info;
+	uint32_t adc;
+	uint8_t data[2];
+
+	if (ui->use_microp_adc) {
+		memset(data, 0x0, 2);
+		if (microp_read_adc(data))
+			USB_ERR("%s: read microp adc fail\n", __func__);
+		adc = data[0]<<8 | data[1];
+		USB_INFO("%s: ADC = %d\n", __func__, MICROPADC_10BIT(adc));
+		return sprintf(buf, "%d\n", MICROPADC_10BIT(adc));
+	} else {
+		htc_get_usb_accessory_adc_level(&adc);
+		USB_INFO("%s: ADC = %d\n", __func__, PM8058ADC_16BIT(adc));
+		return sprintf(buf, "%d\n", PM8058ADC_16BIT(adc));
+	}
+}
+static DEVICE_ATTR(adc, S_IRUGO | S_IWUSR, adc_status_show, NULL);
+#endif
 
 static void accessory_detect_init(struct usb_info *ui)
 {
@@ -1933,6 +2226,7 @@ static void accessory_detect_init(struct usb_info *ui)
 	if (ui->idpin_irq == 0)
 		ui->idpin_irq = gpio_to_irq(ui->usb_id_pin_gpio);
 
+	set_irq_flags(ui->idpin_irq, IRQF_VALID | IRQF_NOAUTOEN);
 	ret = request_irq(ui->idpin_irq, usbid_interrupt,
 				IRQF_TRIGGER_LOW,
 				"car_kit_irq", ui);
@@ -1955,6 +2249,14 @@ static void accessory_detect_init(struct usb_info *ui)
 	ret = device_create_file(dock_switch.dev, &dev_attr_status);
 	if (ret != 0)
 		USB_WARNING("dev_attr_status failed\n");
+
+#ifdef CONFIG_USB_ACCESSORY_DETECT_BY_ADC
+	ret = device_create_file(dock_switch.dev, &dev_attr_adc);
+	if (ret != 0)
+		USB_WARNING("dev_attr_adc failed\n");
+#endif
+
+	enable_irq(ui->idpin_irq);
 
 	return;
 err:
@@ -2018,18 +2320,8 @@ static void charger_detect(struct usb_info *ui)
 			DELAY_FOR_CHECK_CHG);
 		mod_timer(&ui->ac_detect_timer, jiffies + (3 * HZ));
 	} else {
-		if (ui->usb_id_pin_gpio != 0) {
-			if (gpio_get_value(ui->usb_id_pin_gpio) == 0) {
-				USB_INFO("9V AC charger\n");
-				ui->connect_type = CONNECT_TYPE_9V_AC;
-			} else {
-				USB_INFO("AC charger\n");
-				ui->connect_type = CONNECT_TYPE_AC;
-			}
-		} else {
-			USB_INFO("AC charger\n");
-			ui->connect_type = CONNECT_TYPE_AC;
-		}
+		USB_INFO("AC charger\n");
+		ui->connect_type = CONNECT_TYPE_AC;
 		queue_work(ui->usb_wq, &ui->notifier_work);
 		writel(0x00080000, USB_USBCMD);
 		msleep(10);
@@ -2136,10 +2428,13 @@ static void usb_do_work(struct work_struct *w)
 					msleep(5);
 				}
 
-				handle_notify_offline(ui);
+				handle_notify_offline(ui, 0);
 
 				if (ui->phy_reset)
 					ui->phy_reset();
+
+				if (readl(USB_OTGSC) & OTGSC_IDPU)
+					writel(readl(USB_OTGSC) & ~OTGSC_IDPU, USB_OTGSC);
 
 				/* power down phy, clock down usb */
 				usb_lpm_enter(ui);
@@ -2229,6 +2524,14 @@ void msm_hsusb_set_vbus_state(int online)
 				/*USB*/
 				if (ui->usb_uart_switch)
 					ui->usb_uart_switch(0);
+#ifdef CONFIG_MSM_HDMI_MHL
+				if (ui->cable_redetect) {
+					USB_INFO("mhl re-detect\n");
+					disable_irq_nosync(ui->idpin_irq);
+					queue_delayed_work(ui->usb_wq,
+						&ui->detect_work, ADC_RETRY_DELAY);
+				}
+#endif
 			} else {
 				/*turn off USB HUB*/
 				if (ui->usb_hub_enable)
@@ -2240,13 +2543,6 @@ void msm_hsusb_set_vbus_state(int online)
 				/*configure uart pin to alternate function*/
 				if (ui->serial_debug_gpios)
 					ui->serial_debug_gpios(1);
-
-				/*path should be switched to usb after mhl cable is removed*/
-				if (ui->usb_mhl_switch && ui->accessory_type == 4) {
-					USB_INFO("MHL removed\n");
-					ui->usb_mhl_switch(0);
-					ui->accessory_type = 0;
-				}
 			}
 
 			queue_work(ui->usb_wq, &ui->work);
@@ -2708,18 +3004,8 @@ static void ac_detect_expired(unsigned long _data)
 
 		mod_timer(&ui->ac_detect_timer, jiffies + delay);
 	} else {
-		if (ui->usb_id_pin_gpio != 0) {
-			if (gpio_get_value(ui->usb_id_pin_gpio) == 0) {
-				USB_INFO("9V AC charger\n");
-				ui->connect_type = CONNECT_TYPE_9V_AC;
-			} else {
-				USB_INFO("AC charger\n");
-				ui->connect_type = CONNECT_TYPE_AC;
-			}
-		} else {
-			USB_INFO("AC charger\n");
-			ui->connect_type = CONNECT_TYPE_AC;
-		}
+		USB_INFO("AC charger\n");
+		ui->connect_type = CONNECT_TYPE_AC;
 		queue_work(ui->usb_wq, &ui->notifier_work);
 		writel(0x00080000, USB_USBCMD);
 		mdelay(10);
@@ -2727,6 +3013,44 @@ static void ac_detect_expired(unsigned long _data)
 	}
 }
 
+#if (defined(CONFIG_USB_ACCESSORY_DETECT) && defined(CONFIG_MSM_HDMI_MHL))
+static void mhl_status_notifier_func(bool isMHL, bool irq_enble)
+{
+	struct usb_info *ui = the_usb_info;
+	int id_pin = gpio_get_value(ui->usb_id_pin_gpio);
+	static uint8_t mhl_connected;
+	USB_INFO("%s: isMHL %d, id_pin %d\n", __func__, isMHL, id_pin);
+#ifdef CONFIG_HTC_HEADSET_MISC
+	headset_mhl_audio_jack_enable(isMHL);
+#endif
+	if (!isMHL && ui->usb_mhl_switch && ui->accessory_type == 4) {
+		USB_INFO("MHL removed\n");
+		ui->usb_mhl_switch(0);
+		ui->accessory_type = 0;
+#ifdef MHL_REDETECT
+		if (mhl_connected == 0) {
+			USB_INFO("MHL re-detect\n");
+			set_irq_type(ui->idpin_irq,
+				id_pin ? IRQF_TRIGGER_LOW : IRQF_TRIGGER_HIGH);
+			ui->cable_redetect = 1;
+		}
+#endif
+		mhl_connected = 0;
+
+		enable_irq(ui->idpin_irq);
+		return;
+	}
+
+	mhl_connected = 1;
+	set_irq_type(ui->idpin_irq,
+		id_pin ? IRQF_TRIGGER_LOW : IRQF_TRIGGER_HIGH);
+}
+
+static struct t_mhl_status_notifier mhl_status_notifier = {
+	.name = "mhl_detect",
+	.func = mhl_status_notifier_func,
+};
+#endif
 static int msm72k_probe(struct platform_device *pdev)
 {
 	struct resource *res;
@@ -2769,6 +3093,7 @@ static int msm72k_probe(struct platform_device *pdev)
 		USB_INFO("accessory detect %d\n", ui->accessory_detect);
 		ui->usb_id_pin_gpio = pdata->usb_id_pin_gpio;
 		USB_INFO("id_pin_gpio %d\n", pdata->usb_id_pin_gpio);
+		ui->use_microp_adc = pdata->use_microp_adc;
 
 		ui->dock_detect = pdata->dock_detect;
 		USB_INFO("dock detect %d\n", ui->dock_detect);
@@ -2873,6 +3198,10 @@ static int msm72k_probe(struct platform_device *pdev)
 	ui->ac_detect_timer.data = (unsigned long) ui;
 	ui->ac_detect_timer.function = ac_detect_expired;
 	init_timer(&ui->ac_detect_timer);
+
+#if (defined(CONFIG_USB_ACCESSORY_DETECT) && defined(CONFIG_MSM_HDMI_MHL))
+	mhl_detect_register_notifier(&mhl_status_notifier);
+#endif
 	return 0;
 }
 

@@ -40,13 +40,13 @@ g_serial-objs			:= serial.o
 g_midi-objs			:= gmidi.o
 gadgetfs-objs			:= inode.o
 g_file_storage-objs		:= file_storage.o
-g_mass_storage-objs		:= mass_storage.o
 g_printer-objs			:= printer.o
 g_cdc-objs			:= cdc2.o
 g_multi-objs			:= multi.o
 g_hid-objs			:= hid.o
 g_nokia-objs			:= nokia.o
 g_webcam-objs			:= webcam.o
+serial-objs			:= f_serial.o
 
 obj-$(CONFIG_USB_ZERO)		+= g_zero.o
 obj-$(CONFIG_USB_AUDIO)		+= g_audio.o
@@ -71,6 +71,8 @@ obj-$(CONFIG_USB_ANDROID_MASS_STORAGE)	+= f_mass_storage.o
 obj-$(CONFIG_USB_ANDROID_MTP)	+= f_mtp.o
 obj-$(CONFIG_USB_ANDROID_RNDIS)	+= f_rndis.o u_ether.o
 obj-$(CONFIG_USB_ANDROID_ACCESSORY)	+= f_accessory.o
+obj-$(CONFIG_USB_ANDROID_SERIAL)	+= serial.o u_serial.o
+obj-$(CONFIG_USB_ANDROID_ECM)	+= f_ecm.o u_ether.o
 
 # MSM specific
 obj-$(CONFIG_USB_ANDROID_DIAG)	+= diag.o
