@@ -834,7 +834,7 @@ rndis_bind_config(struct usb_configuration *c, u8 ethaddr[ETH_ALEN])
 	rndis->port.wrap = rndis_add_header;
 	rndis->port.unwrap = rndis_rm_hdr;
 
-	rndis->port.func.name = "ether";
+	rndis->port.func.name = "rndis";
 	rndis->port.func.strings = rndis_strings;
 	/* descriptors are per-instance copies */
 	rndis->port.func.bind = rndis_bind;
@@ -871,7 +871,7 @@ int rndis_function_bind_config(struct usb_configuration *c)
 }
 
 static struct android_usb_function rndis_function = {
-	.name = "ether",
+	.name = "rndis",
 	.bind_config = rndis_function_bind_config,
 };
 

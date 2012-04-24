@@ -479,6 +479,10 @@ int android_show_function(char *buf)
 	list_for_each_entry(f, &android_config_driver.functions, list) {
 		length += sprintf(buf + length, "%s:%s\n", f->name,
 			(f->hidden)?"disable":"enable");
+		if (strcmp(f->name, "rndis") == 0) {
+			length += sprintf(buf + length, "%s:%s\n", "ether",
+				(f->hidden)?"disable":"enable");
+		}
 	}
 	return length;
 }
@@ -524,7 +528,8 @@ int android_switch_function(unsigned func)
 			!strcmp(f->name, "acm"))
 			f->hidden = 0;
 		else if ((func & (1 << USB_FUNCTION_RNDIS)) &&
-			!strcmp(f->name, "ether")) {
+			(!strcmp(f->name, "rndis") ||
+			 !strcmp(f->name, "ether"))) {
 			if (f->hidden) {
 				printk("%s: rndis perf lock\n", __func__);
 				wake_lock(&usb_rndis_idle_wake_lock);
@@ -557,7 +562,8 @@ int android_switch_function(unsigned func)
 			!strcmp(f->name, "projector"))
 			f->hidden = 0;
 		else {
-			if (!strcmp(f->name, "ether") && !f->hidden) {
+			if ((!strcmp(f->name, "rndis") ||
+			     !strcmp(f->name, "ether")) && !f->hidden) {
 				printk("%s: rndis perf unlock\n", __func__);
 				wake_unlock(&usb_rndis_idle_wake_lock);
 				if (is_perf_lock_active(&usb_rndis_perf_lock))

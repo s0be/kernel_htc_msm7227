@@ -299,7 +299,7 @@ static char *usb_functions[] = {
 	"mtp_tunnel",
 #endif
 #if defined(CONFIG_USB_FUNCTION_ETHER)
-	"ether",
+	"rndis",
 #endif
 #if defined(CONFIG_USB_FUNCTION_MODEM)
 	"modem",
