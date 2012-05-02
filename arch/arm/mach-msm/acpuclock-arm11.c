@@ -125,11 +125,9 @@ static struct clkctl_acpu_speed msm7227_tbl[] = {
 	{  768000, ACPU_PLL_0, 4, 1, 192000, 3, VDD_7, 192000, 0, 5, -1, 0x28 },
 	{  787200, ACPU_PLL_0, 4, 1, 196800, 3, VDD_7, 196800, 0, 5, -1, 0x29 },
 	{  806400, ACPU_PLL_0, 4, 1, 201600, 3, VDD_7, 201600, 0, 5, -1, 0x2a },
-#if 0 /* disable values which will probably toast the device */
 	{  825600, ACPU_PLL_0, 4, 1, 206400, 3, VDD_7, 206400, 0, 6, -1, 0x2b },
 	{  844800, ACPU_PLL_0, 4, 1, 211200, 3, VDD_7, 211200, 0, 6, -1, 0x2c },
 	{  864000, ACPU_PLL_0, 4, 1, 216000, 3, VDD_7, 216000, 0, 6, -1, 0x2d },
-#endif
 	{  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
 };
 /* PLL0(mpll): 960MHz, PLL1(gpll):245.76MHz, PLL2(bpll): 800MHz */
@@ -184,17 +182,18 @@ static unsigned long max_axi_rate;
 #ifdef CONFIG_CPU_FREQ
 static struct cpufreq_frequency_table *freq_table;
 static struct cpufreq_frequency_table msm7227_freq_table[] = {
-	{ 0, 245760 },
-	{ 1, 400000 },
-	{ 2, 480000 },
-	{ 3, 600000 },
-	{ 4, 768000 },
-	{ 5, 787200 },
-	{ 6, 806400 },
-	{ 7, 825600 },
-	{ 8, 844800 },
-	{ 9, 864000 },
-	{ 10, CPUFREQ_TABLE_END },
+	{ 0, 120000 },
+	{ 1, 122880 },
+	{ 2, 200000 },
+	{ 3, 245760 },
+	{ 4, 320000 },
+	{ 5, 400000 },
+	{ 6, 480000 },
+	{ 7, 600000 },
+	{ 8, 768000 },
+	{ 9, 787200 },
+	{ 10, 806400 },
+	{ 11, CPUFREQ_TABLE_END },
 };
 static struct cpufreq_frequency_table msm72xx_freq_table[] = {
 #if defined(CONFIG_TURBO_MODE)
